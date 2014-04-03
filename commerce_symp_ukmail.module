@@ -1,0 +1,571 @@
+<?php
+
+/**
+ * Implements hook_menu().
+ */
+function commerce_symp_ukmail_menu() {
+  $items = array();
+
+  $items['admin/commerce/config/shipping/ukmail'] = array(
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('commerce_symp_ukmail_config_form'),
+    'title' => 'UKMail configuration',
+    'description' => 'Configure settings for the UKMail shipping module including prices.',
+    'access arguments' => array('set ukmail configuration'),
+    'file' => 'commerce_symp_ukmail.admin.inc',
+  );
+
+  return $items;
+}
+
+/**
+ * Implements hook_permission().
+ */
+function commerce_symp_ukmail_permission() {
+  return array(
+    'set ukmail configuration' => array(
+      'title' => t('Configure UKMail settings and prices'),
+      'description' => t('Allows users to set the prices for the various weight brackets and shipping zones'),
+    ),
+  );
+}
+
+/**
+ * Implements hook_rules_condition_info().
+ */
+function commerce_symp_ukmail_rules_condition_info() {
+  $conditions = array();
+
+  $conditions['commerce_symp_ukmail_order_shipping_zone'] = array(
+    'label' => t('Order to be sent to a set UKMail zone'),
+    'parameter' => array(
+      'commerce_order' => array(
+        'type' => 'commerce_order',
+        'label' => t('Order'),
+        'description' => t('The order containing the profile reference with the address in question.'),
+      ),
+      'address_field' => array(
+        'type' => 'text',
+        'label' => t('Address'),
+        'options list' => 'commerce_symp_ukmail_address_field_options_list',
+        'description' => t('The address associated with this order whose component you want to compare.'),
+        'restriction' => 'input',
+      ),
+      'value' => array(
+        'type' => 'text',
+        'label' => t('Zone'),
+        'description' => t('The value to compare against the address component. Bear in mind that addresses using select lists for various components may use a value different from the option you select. For example, countries are selected by name, but the value is the two letter abbreviation. For comparisons with multiple possible values, place separate values on new lines.'),
+        'options list' => 'commerce_symp_ukmail_zones_options_list',
+        'restriction' => 'input',
+      ),
+    ),
+    'group' => t('Commerce Shipping'),
+    'callbacks' => array(
+      'execute' => 'commerce_symp_ukmail_order_shipping_zone',
+    ),
+  );
+
+  return $conditions;
+}
+
+/**
+ * Options list callback: list of zones.
+ */
+function commerce_symp_ukmail_zones_options_list() {
+  return drupal_map_assoc(range('A', 'M'));
+}
+
+/**
+ * Options list callback: address fields for the address comparison condition.
+ */
+function commerce_symp_ukmail_address_field_options_list() {
+  $options = array();
+
+  // Retrieve a list of all address fields on customer profile bundles.
+  $address_fields = commerce_info_fields('addressfield', 'commerce_customer_profile');
+
+  // Loop over every customer profile reference field on orders.
+  foreach (commerce_info_fields('commerce_customer_profile_reference', 'commerce_order') as $field_name => $field) {
+    // Retrieve the type of customer profile referenced by this field.
+    $type = $field['settings']['profile_type'];
+
+    // Loop over every address field looking for any attached to this bundle.
+    foreach ($address_fields as $address_field_name => $address_field) {
+      if (in_array($type, $address_field['bundles']['commerce_customer_profile'])) {
+        // Add it to the options list.
+        $instance = field_info_instance('commerce_customer_profile', 'commerce_customer_address', $type);
+        $translated_instance = commerce_i18n_object('field_instance', $instance);
+
+        $options[commerce_customer_profile_type_get_name($type)][$field_name . '|' . $address_field_name] = check_plain($translated_instance['label']);
+      }
+    }
+  }
+
+  if (empty($options)) {
+    drupal_set_message(t('No order addresses could be found for comparison.'), 'error');
+  }
+
+  return $options;
+}
+
+/**
+ * Rule condition callback.
+ */
+function commerce_symp_ukmail_order_shipping_zone($order, $address_field, $value) {
+  list($field_name, $address_field_name) = explode('|', $address_field);
+
+  $zone = '';
+  $default_zone = 'A';
+
+  // If we actually received a valid order...
+  if (!empty($order)) {
+    $wrapper = entity_metadata_wrapper('commerce_order', $order);
+
+    if (!empty($wrapper->{$field_name})) {
+      $address = $wrapper->{$field_name}->{$address_field_name}->value();
+
+      // Check country
+      $zone = commerce_symp_ukmail_find_by_country($address['country']);
+
+
+      if (!$zone) {
+        $postcode = drupal_strtoupper($address['postal_code']);
+        // Find by postcode
+        for ($number_of_characters = 4; $number_of_characters > 0; $number_of_characters--) {
+          $function_name = $method_name = 'commerce_symp_ukmail_find_by_postcode_' . $number_of_characters;
+          $search_postcode = drupal_substr($postcode, 0, $number_of_characters);
+          $zone = $function_name($search_postcode, $postcode);
+
+          // If a matching zone has been found, break from the for loop.
+          if ($zone) {
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  // If we still haven't got a zone, it's probably A
+  if (!$zone) $zone = $default_zone;
+
+  if ($zone == $value) return TRUE;
+
+  return FALSE;
+}
+
+function commerce_symp_ukmail_find_by_country($country) {
+  if ($country == 'GB') return FALSE;
+  switch ($country) {
+    case 'IE': // Ireland
+      return 'E';
+
+    case 'GG': // Guernsey
+    case 'IM': // Isle of Man
+    case 'JE': // Jersey
+      return 'D';
+
+    case 'AD': // Andorra
+    case 'AT': // Austria
+    case 'BE': // Belgium
+    case 'DE': // Germany
+    case 'DK': // Denmark
+    case 'ES': // Spain
+    case 'FI': // Finland
+    case 'FO': // Faroe Islands
+    case 'FR': // France
+    case 'GL': // Greenland
+    case 'GR': // Greece
+    case 'IT': // Italy
+    case 'LU': // Luxembourg
+    case 'MC': // Monaco
+    case 'NL': // Netherlands
+    case 'PT': // Portugal
+    case 'SE': // Sweden
+      return 'F';
+
+    case 'CH': // Switzerland
+    case 'GI': // Gibralter
+    case 'IS': // Iceland
+    case 'LI': // Liechtenstein
+    case 'NO': // Norway
+      return 'G';
+
+    case 'AL': // Albania
+    case 'BA': // Boznia & Herzegovina
+    case 'BG': // Bulgaria
+    case 'BY': // Belarus
+    case 'CY': // Cyprus
+    case 'CZ': // Czech Republic
+    case 'EE': // Estonia
+    case 'HR': // Croatia
+    case 'HU': // Hungary
+    case 'LT': // Lithuania
+    case 'LV': // Latvia
+    case 'MD': // Moldova
+    case 'ME': // Montenegro
+    case 'MK': // Macedonia
+    case 'PL': // Poland
+    case 'RO': // Romania
+    case 'RS': // Serbia
+    case 'RU': // Russia
+    case 'SI': // Solvenia
+    case 'SK': // Slovakia
+    case 'TR': // Turkey
+    case 'UA': // Ukraine
+      return 'H';
+
+    default:
+      return FALSE;
+  }
+}
+
+function commerce_symp_ukmail_find_by_postcode_1($postcode, $original) {
+  switch ($postcode) {
+    case 'G':
+      return 'B';
+  }
+  return '';
+}
+
+function commerce_symp_ukmail_find_by_postcode_2($postcode, $original) {
+  switch ($postcode) {
+    case 'DD':
+    case 'DG':
+    case 'EH':
+    case 'FK':
+    case 'KY':
+    case 'ML':
+    case 'TD':
+      return 'B';
+
+    case 'KA':
+      // Don't include KA27 and KA28 as these are within Zone D.
+      $four_characters = drupal_substr($original, 0, 4);
+      if (!in_array($four_characters, array('KA27', 'KA28'))) {
+        return 'B';
+      }
+      break;
+
+    case 'HS':
+    case 'ZE':
+      return 'D';
+
+    case 'BT': // Northern Ireland (http://en.wikipedia.org/wiki/BT_postcode_area)
+      return 'E';
+  }
+}
+
+function commerce_symp_ukmail_find_by_postcode_3($postcode, $original) {
+  switch ($postcode) {
+    case 'PA1':
+    case 'PA2':
+    case 'PA3':
+    case 'PA4':
+    case 'PA5':
+    case 'PA6':
+    case 'PA7':
+    case 'PA8':
+    case 'PA9':
+    case 'PH1':
+    case 'PH2':
+    case 'PH3':
+      return 'B';
+
+    case 'IV1':
+    case 'IV2':
+    case 'IV3':
+    case 'IV4':
+    case 'IV5':
+    case 'IV6':
+    case 'IV7':
+    case 'IV8':
+    case 'IV9':
+    case 'KW1':
+    case 'KW2':
+    case 'KW3':
+    case 'KW4':
+    case 'KW5':
+    case 'KW6':
+    case 'KW7':
+    case 'KW8':
+    case 'KW9':
+    case 'PH4':
+    case 'PH5':
+    case 'PH6':
+    case 'PH7':
+    case 'PH8':
+    case 'PH9':
+      return 'C';
+  }
+}
+
+function commerce_symp_ukmail_find_by_postcode_4($postcode, $original) {
+  switch ($postcode) {
+    case 'AB10':
+    case 'AB11':
+    case 'AB12':
+    case 'AB13':
+    case 'AB14':
+    case 'AB15':
+    case 'AB16':
+    case 'AB21':
+    case 'AB22':
+    case 'AB23':
+    case 'AB24':
+    case 'AB25':
+    case 'AB30':
+    case 'AB39':
+    case 'PA10':
+    case 'PA11':
+    case 'PA12':
+    case 'PA13':
+    case 'PA14':
+    case 'PA15':
+    case 'PA16':
+    case 'PA17':
+    case 'PA18':
+    case 'PA19':
+      return 'B';
+
+    case 'AB31':
+    case 'AB32':
+    case 'AB33':
+    case 'AB34':
+    case 'AB35':
+    case 'AB36':
+    case 'AB37':
+    case 'AB38':
+    case 'AB40':
+    case 'AB41':
+    case 'AB42':
+    case 'AB43':
+    case 'AB44':
+    case 'AB45':
+    case 'AB46':
+    case 'AB47':
+    case 'AB48':
+    case 'AB49':
+    case 'AB50':
+    case 'AB51':
+    case 'AB52':
+    case 'AB53':
+    case 'AB54':
+    case 'AB55':
+    case 'AB56':
+    case 'IV10':
+    case 'IV11':
+    case 'IV12':
+    case 'IV13':
+    case 'IV14':
+    case 'IV15':
+    case 'IV16':
+    case 'IV17':
+    case 'IV18':
+    case 'IV19':
+    case 'IV20':
+    case 'IV21':
+    case 'IV22':
+    case 'IV23':
+    case 'IV24':
+    case 'IV25':
+    case 'IV26':
+    case 'IV27':
+    case 'IV28':
+    case 'IV30':
+    case 'IV31':
+    case 'IV32':
+    case 'IV36':
+    case 'IV37':
+    case 'IV38':
+    case 'IV39':
+    case 'IV40':
+    case 'IV52':
+    case 'IV53':
+    case 'IV54':
+    case 'IV63':
+    case 'KW10':
+    case 'KW11':
+    case 'KW12':
+    case 'KW13':
+    case 'KW14':
+    case 'PA21':
+    case 'PA22':
+    case 'PA23':
+    case 'PA24':
+    case 'PA25':
+    case 'PA26':
+    case 'PA27':
+    case 'PA28':
+    case 'PA29':
+    case 'PA30':
+    case 'PA31':
+    case 'PA32':
+    case 'PA33':
+    case 'PA34':
+    case 'PA35':
+    case 'PA36':
+    case 'PA37':
+    case 'PA38':
+    case 'PH10':
+    case 'PH11':
+    case 'PH12':
+    case 'PH13':
+    case 'PH14':
+    case 'PH15':
+    case 'PH16':
+    case 'PH17':
+    case 'PH18':
+    case 'PH19':
+    case 'PH20':
+    case 'PH21':
+    case 'PH22':
+    case 'PH23':
+    case 'PH24':
+    case 'PH25':
+    case 'PH26':
+    case 'PH27':
+    case 'PH28':
+    case 'PH29':
+    case 'PH30':
+    case 'PH31':
+    case 'PH32':
+    case 'PH33':
+    case 'PH34':
+    case 'PH35':
+    case 'PH36':
+    case 'PH37':
+    case 'PH38':
+    case 'PH39':
+    case 'PH40':
+    case 'PH41':
+    case 'PH49':
+    case 'PH50':
+      return 'C';
+
+    case 'IV41':
+    case 'IV42':
+    case 'IV43':
+    case 'IV44':
+    case 'IV45':
+    case 'IV46':
+    case 'IV47':
+    case 'IV48':
+    case 'IV49':
+    case 'IV51':
+    case 'IV55':
+    case 'IV56':
+    case 'KA27':
+    case 'KA28':
+    case 'KW15':
+    case 'KW16':
+    case 'KW17':
+    case 'PA20':
+    case 'PA41':
+    case 'PA42':
+    case 'PA43':
+    case 'PA44':
+    case 'PA45':
+    case 'PA46':
+    case 'PA47':
+    case 'PA48':
+    case 'PA49':
+    case 'PH42':
+    case 'PH43':
+    case 'PH44':
+      return 'D';
+  }
+}
+
+function commerce_symp_ukmail_commerce_shipping_service_info() {
+  $services = array();
+//return $services;
+  $zones = range('A', 'E');
+  $weight_brackets = array(
+    array(
+      'label' => 'Up to 1KG',
+      'min' => FALSE,
+      'max' => 1,
+    ),
+    array(
+      'label' => 'Up to 2KG',
+      'min' => 1,
+      'max' => 2,
+    ),
+    array(
+      'label' => 'Up to 5KG',
+      'min' => 2,
+      'max' => 5,
+    ),
+    array(
+      'label' => 'Up to 10KG',
+      'min' => 5,
+      'max' => 10,
+    ),
+    array(
+      'label' => 'Over 10KG',
+      'min' => 10,
+      'max' => FALSE,
+    ),
+  );
+
+  foreach ($zones as $zone) {
+    foreach ($weight_brackets as $weight_bracket) {
+      $name = t('UKMail - @weight - Zone @zone', array('@weight' => $weight_bracket['label'], '@zone' => $zone));
+      $label = 'ukmail_'. str_replace(' ', '_', strtolower($weight_bracket['label'])) .'_zone_'. strtolower($zone);
+
+      // Create a base rate price array for the service
+      $amount = variable_get('commerce_symp_ukmail_'. $label, '');
+      // Convert amount to pence
+      $amount = $amount * 100;
+      $base_rate = array(
+        'amount' => $amount,
+        'currency_code' => 'GBP',
+        'data' => array(),
+      );
+
+      $data = array(
+        'include_tax' => 'uk_vat',
+      );
+
+      $price_component_type = 'flat_rate_' . $label;
+
+      // If the data array specifies an included tax, include it now.
+      if (module_exists('commerce_tax') && !empty($data['include_tax']) && $tax_rate = commerce_tax_rate_load($data['include_tax'])) {
+        // Reverse apply the tax.
+        $tax_amount = $base_rate['amount'] - ($base_rate['amount'] / (1 + $tax_rate['rate']));
+        $tax_amount = commerce_tax_rate_round_amount($tax_rate, $tax_amount);
+
+        // Add a base price to the data array.
+        $component = array(
+          'amount' => $base_rate['amount'] - $tax_amount,
+          'currency_code' => $base_rate['currency_code'],
+          'data' => array(),
+        );
+
+        $base_rate['data'] = commerce_price_component_add($base_rate, $price_component_type, $component, TRUE, FALSE);
+
+        // Add the tax to the data array.
+        $component['amount'] = $tax_amount;
+        $component['data']['tax_rate'] = $tax_rate;
+
+        $base_rate['data'] = commerce_price_component_add($base_rate, $tax_rate['price_component'], $component, TRUE);
+      }
+
+      $services[$label] = array(
+        'title' => $name,
+        'display_title' => $name,
+        'description' => '',
+        'shipping_method' => 'flat_rate',
+        'rules_component' => TRUE,
+        'price_component' => $price_component_type,
+        'callbacks' => array(
+          'rate' => 'commerce_flat_rate_service_rate_order',
+        ),
+        'base_rate' => $base_rate,
+        'data' => $data,
+      );
+    }
+  }
+
+  return $services;
+}

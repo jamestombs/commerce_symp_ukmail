@@ -1,0 +1,5 @@
+name = Symp UKMail
+description = Add rules for Drupal Commerce to deal with the UKMail shipping service.
+core = 7.x
+package = Commerce (shipping)
+dependencies[] = commerce_shipping
